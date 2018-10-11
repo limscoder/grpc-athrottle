@@ -49,8 +49,8 @@ func shouldAccept(err error) bool {
 	}
 
 	c := s.Code()
-	for i := 0; i < len(overloadCodes); i++ {
-		if c == overloadCodes[i] {
+	for _, oc := range overloadCodes {
+		if c == oc {
 			return false
 		}
 	}
