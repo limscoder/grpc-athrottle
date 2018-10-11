@@ -1,7 +1,6 @@
 package grpc_athrottle
 
 import (
-	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -12,20 +11,38 @@ type bin struct {
 	requestCount int
 }
 
+// CounterEvent event code
+type CounterEvent uint32
+
+const (
+	// RequestEvent is fired when a new request is dispatched
+	RequestEvent CounterEvent = 0
+	// AcceptEvent is fired when a request is accepted
+	AcceptEvent CounterEvent = 1
+	// RejectEvent is fired when a request is rejected
+	RejectEvent CounterEvent = 2
+)
+
+// Counter tracks request status over a sliding window
 type Counter struct {
 	sync.Mutex
-	bins   []bin
-	binIdx int
-	minReq int
-	rdm    *rand.Rand
+	bins     []bin
+	binIdx   int
+	minReq   int
+	k        float32
+	rdm      *rand.Rand
+	callback func(CounterEvent)
 }
 
-func NewCounter(binCount int, binDuration time.Duration, minReq int, seed int) *Counter {
+// NewCounter returns Counter instance
+func NewCounter(binCount int, binDuration time.Duration, minReq int, k float32, seed int64, callback func(CounterEvent)) *Counter {
 	c := &Counter{
-		bins:   make([]bin, binCount, binCount),
-		binIdx: 0,
-		minReq: minReq,
-		rdm:    rand.New(rand.NewSource(int64(seed))),
+		bins:     make([]bin, binCount, binCount),
+		binIdx:   0,
+		minReq:   minReq,
+		k:        k,
+		rdm:      rand.New(rand.NewSource(seed)),
+		callback: callback,
 	}
 
 	ticker := time.NewTicker(binDuration)
@@ -48,19 +65,24 @@ func NewCounter(binCount int, binDuration time.Duration, minReq int, seed int) *
 	return c
 }
 
+// MarkRequest increments the total request count
 func (c *Counter) MarkRequest() {
 	c.Lock()
 	defer c.Unlock()
 	c.bins[c.binIdx].requestCount++
+	c.callback(RequestEvent)
 }
 
+// MarkAccept increments the accepted request count
 func (c *Counter) MarkAccept() {
 	c.Lock()
 	defer c.Unlock()
 	c.bins[c.binIdx].acceptCount++
+	c.callback(AcceptEvent)
 }
 
-func (c *Counter) RejectNext(k int) bool {
+// RejectNext returns true if a request should be rejected
+func (c *Counter) RejectNext() bool {
 	acceptCount := 0
 	requestCount := 0
 
@@ -75,6 +97,11 @@ func (c *Counter) RejectNext(k int) bool {
 		return false
 	}
 
-	p := math.Max(0., float64(requestCount-k*acceptCount)/float64(requestCount+1))
-	return c.rdm.Float64() < p
+	inflightCount := float32(requestCount) - c.k*float32(acceptCount)
+	failRatio := inflightCount / float32(requestCount+1)
+	reject := c.rdm.Float32() < failRatio
+	if reject {
+		c.callback(RejectEvent)
+	}
+	return reject
 }
